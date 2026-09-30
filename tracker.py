@@ -300,6 +300,49 @@ def guardar_estado(estado: dict):
     STATE_FILE.write_text(json.dumps(estado, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+SUBS_FILE = Path(__file__).parent / "subscribers.json"
+
+
+def cargar_subs() -> set:
+    subs = set()
+    if CHAT_ID:
+        subs.add(str(CHAT_ID))
+    if SUBS_FILE.exists():
+        try:
+            for x in json.loads(SUBS_FILE.read_text(encoding="utf-8")):
+                subs.add(str(x))
+        except Exception:
+            pass
+    return subs
+
+
+def agregar_sub(chat: str):
+    try:
+        subs = cargar_subs()
+        if str(chat) not in subs:
+            subs.add(str(chat))
+            SUBS_FILE.write_text(json.dumps(sorted(subs), indent=2), encoding="utf-8")
+            print(f"  [Subs] nuevo {chat} (total {len(subs)})", flush=True)
+    except Exception as e:
+        print(f"  [Subs] error: {e}", flush=True)
+
+
+def quitar_sub(chat: str):
+    try:
+        subs = cargar_subs()
+        subs.discard(str(chat))
+        if CHAT_ID:
+            subs.add(str(CHAT_ID))
+        SUBS_FILE.write_text(json.dumps(sorted(subs), indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+async def enviar_a_todos(mensaje: str):
+    for chat in sorted(cargar_subs()):
+        await enviar_telegram(mensaje, chat_id=chat)
+
+
 async def enviar_telegram(mensaje: str, chat_id: str | None = None):
     if not BOT_TOKEN or not CHAT_ID:
         print("  [Telegram] sin configurar (.env), solo consola.")
@@ -372,7 +415,7 @@ async def ronda():
                 lineas.append(f"Mejor: {formato_clp(actual)}")
                 lineas.append(f"Meta: {formato_clp(config.PRECIO_OBJETIVO)}")
                 lineas.append(res["url"])
-                await enviar_telegram("\n".join(lineas))
+                await enviar_a_todos("\n".join(lineas))
 
         estado[key] = {"precio": actual, "internet": internet, "tarjeta": tarjeta, "hora": res["hora"]}
         # pausa corta entre tiendas para ir al minimo sin parecer bot
@@ -404,6 +447,12 @@ async def telegram_poll_loop():
                 if not chat:
                     continue
                 texto = (msg.get("text") or "").strip().lower()
+                if texto in ("salir", "stop", "/stop"):
+                    quitar_sub(chat)
+                    await enviar_telegram("Listo, ya no te avisare de bajas.", chat_id=chat)
+                    continue
+                # auto-suscripcion: quien escriba queda registrado para las alertas
+                agregar_sub(chat)
                 # comandos abiertos a cualquiera (las alertas de precio siguen yendo solo al dueno)
                 if texto in ("test", "/test", "hola", "ok", "/start", "start"):
                     estado = cargar_estado()

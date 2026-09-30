@@ -380,11 +380,62 @@ async def ronda():
     guardar_estado(estado)
 
 
+async def telegram_poll_loop():
+    """Escucha mensajes al bot. Si escribes 'test', responde que esta OK."""
+    import os
+    instancia = os.getenv("INSTANCIA", "nube" if os.getenv("PORT") else "pc")
+    if not BOT_TOKEN or not CHAT_ID:
+        return
+    offset = 0
+    print(f"  [Telegram] escucha activa ({instancia}): escribeme 'test' o 'precios'", flush=True)
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=40) as c:
+                r = await c.get(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
+                    params={"offset": offset, "timeout": 25},
+                )
+                data = r.json() if r.status_code == 200 else {}
+            for up in data.get("result", []):
+                offset = up["update_id"] + 1
+                msg = up.get("message") or {}
+                chat = str(msg.get("chat", {}).get("id", ""))
+                texto = (msg.get("text") or "").strip().lower()
+                if chat != str(CHAT_ID):
+                    continue
+                if texto in ("test", "/test", "hola", "ok"):
+                    estado = cargar_estado()
+                    mejores = [(v.get("precio"), k) for k, v in estado.items() if v.get("precio")]
+                    mejor_txt = f"Mejor visto: {formato_clp(min(m[0] for m in mejores))}" if mejores else "Aun sin primera ronda"
+                    await enviar_telegram(
+                        f"Bot OK ({instancia}). Vigilando {len(config.PRODUCTS)} productos cada {config.INTERVALO_SEGUNDOS}s.\n"
+                        f"Meta: {formato_clp(config.PRECIO_OBJETIVO)}.\n{mejor_txt}."
+                    )
+                elif texto in ("precios", "/precios", "precio"):
+                    estado = cargar_estado()
+                    lineas = ["Precios actuales:"]
+                    for prod in config.PRODUCTS:
+                        v = estado.get(prod["url"], {})
+                        if v.get("precio"):
+                            extra = ""
+                            if v.get("internet"):
+                                extra += f" int {formato_clp(v['internet'])}"
+                            if v.get("tarjeta"):
+                                extra += f" tarj {formato_clp(v['tarjeta'])}"
+                            lineas.append(f"- {prod['tienda']}: {formato_clp(v['precio'])} ({extra.strip()})")
+                    await enviar_telegram("\n".join(lineas[:30]))
+        except Exception as e:
+            print(f"  [Telegram-poll] error: {e}", flush=True)
+            await asyncio.sleep(10)
+        await asyncio.sleep(1)
+
+
 async def main():
-    print("🎮 Bot PS5 Cyber Day iniciado")
-    print(f"   Meta: <= ${config.PRECIO_OBJETIVO:,} | Intervalo: {config.INTERVALO_SEGUNDOS}s")
+    print("Bot PS5 Cyber Day iniciado", flush=True)
+    print(f"   Meta: <= ${config.PRECIO_OBJETIVO:,} | Intervalo: {config.INTERVALO_SEGUNDOS}s", flush=True)
     if not BOT_TOKEN:
-        print("   ⚠️ Telegram no configurado. Crea .env (ver .env.example). Igual verás precios en consola.")
+        print("   Telegram no configurado. Crea .env (ver .env.example). Igual veras precios en consola.", flush=True)
+    asyncio.create_task(telegram_poll_loop())
     while True:
         try:
             await ronda()

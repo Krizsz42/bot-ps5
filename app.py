@@ -30,6 +30,15 @@ def status():
         return jsonify({"bot": BOT_STATUS, "error": str(e)})
 
 
+@app.get("/test")
+def test_msg():
+    import asyncio
+    from tracker import enviar_telegram
+
+    asyncio.run(enviar_telegram("Prueba desde la nube (Render) OK. Bot vigilando Paris+Falabella cada 60s."))
+    return "mensaje de prueba enviado", 200
+
+
 def run_bot():
     import tracker
     print("BOT-THREAD iniciando...", flush=True)

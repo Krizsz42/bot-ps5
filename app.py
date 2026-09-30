@@ -33,10 +33,12 @@ def status():
 @app.get("/test")
 def test_msg():
     import asyncio
-    from tracker import enviar_telegram
+    from flask import request
+    from tracker import enviar_a_todos
 
-    asyncio.run(enviar_telegram("Prueba desde la nube (Render) OK. Bot vigilando Paris+Falabella cada 60s."))
-    return "mensaje de prueba enviado", 200
+    msg = request.args.get("msg") or "Prueba desde la nube (Render) OK. Bot vigilando Paris+Falabella cada 60s."
+    asyncio.run(enviar_a_todos(msg[:500]))
+    return "mensaje de prueba enviado a todos", 200
 
 
 def run_bot():

@@ -300,16 +300,17 @@ def guardar_estado(estado: dict):
     STATE_FILE.write_text(json.dumps(estado, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-async def enviar_telegram(mensaje: str):
+async def enviar_telegram(mensaje: str, chat_id: str | None = None):
     if not BOT_TOKEN or not CHAT_ID:
         print("  [Telegram] sin configurar (.env), solo consola.")
         print(f"  {mensaje[:300]}")
         return
     try:
+        destino = chat_id or CHAT_ID
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                json={"chat_id": CHAT_ID, "text": mensaje, "disable_web_page_preview": False},
+                json={"chat_id": destino, "text": mensaje, "disable_web_page_preview": False},
             )
             if r.status_code != 200:
                 print(f"  [Telegram] error {r.status_code}: {r.text[:200]}")
@@ -400,16 +401,18 @@ async def telegram_poll_loop():
                 offset = up["update_id"] + 1
                 msg = up.get("message") or {}
                 chat = str(msg.get("chat", {}).get("id", ""))
-                texto = (msg.get("text") or "").strip().lower()
-                if chat != str(CHAT_ID):
+                if not chat:
                     continue
-                if texto in ("test", "/test", "hola", "ok"):
+                texto = (msg.get("text") or "").strip().lower()
+                # comandos abiertos a cualquiera (las alertas de precio siguen yendo solo al dueno)
+                if texto in ("test", "/test", "hola", "ok", "/start", "start"):
                     estado = cargar_estado()
                     mejores = [(v.get("precio"), k) for k, v in estado.items() if v.get("precio")]
                     mejor_txt = f"Mejor visto: {formato_clp(min(m[0] for m in mejores))}" if mejores else "Aun sin primera ronda"
                     await enviar_telegram(
                         f"Bot OK ({instancia}). Vigilando {len(config.PRODUCTS)} productos cada {config.INTERVALO_SEGUNDOS}s.\n"
-                        f"Meta: {formato_clp(config.PRECIO_OBJETIVO)}.\n{mejor_txt}."
+                        f"Meta: {formato_clp(config.PRECIO_OBJETIVO)}.\n{mejor_txt}.",
+                        chat_id=chat,
                     )
                 elif texto in ("precios", "/precios", "precio"):
                     estado = cargar_estado()
@@ -423,7 +426,7 @@ async def telegram_poll_loop():
                             if v.get("tarjeta"):
                                 extra += f" tarj {formato_clp(v['tarjeta'])}"
                             lineas.append(f"- {prod['tienda']}: {formato_clp(v['precio'])} ({extra.strip()})")
-                    await enviar_telegram("\n".join(lineas[:30]))
+                    await enviar_telegram("\n".join(lineas[:30]), chat_id=chat)
         except Exception as e:
             print(f"  [Telegram-poll] error: {e}", flush=True)
             await asyncio.sleep(10)

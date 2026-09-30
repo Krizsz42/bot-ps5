@@ -1,0 +1,388 @@
+"""
+Bot PS5 Cyber Day Chile
+- Revisa Falabella, Paris, Ripley, PC Factory cada N segundos
+- Detecta baja de precio / quiebre de umbral $400.000
+- Avisa por Telegram (instantáneo y gratis)
+
+Uso:
+  pip install -r requirements.txt
+  playwright install chromium  (solo 1 vez)
+  configura .env y luego:  python tracker.py
+"""
+import asyncio
+import json
+import os
+import random
+import re
+import sys
+from datetime import datetime
+from pathlib import Path
+
+import httpx
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+
+import config
+
+load_dotenv()
+
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+STATE_FILE = Path(__file__).parent / "state.json"
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept-Language": "es-CL,es;q=0.9",
+    "Accept": "text/html,application/xhtml+xml",
+}
+
+def parse_precio_cl(texto: str) -> int | None:
+    """$609.990 / $ 1.299.990 -> 609990. Exige $ para no tragarse SKUs."""
+    if not texto:
+        return None
+    from collections import Counter
+    # solo precios con $ delante y con formato chileno con puntos
+    matches = re.findall(r"\$\s*(\d{1,3}(?:\.\d{3})+)", texto)
+    precios = []
+    for m in matches:
+        try:
+            v = int(m.replace(".", ""))
+            if 100000 <= v <= 3000000:
+                precios.append(v)
+        except ValueError:
+            continue
+    if not precios:
+        return None
+    # el más frecuente (el precio principal se repite muchas veces), desempate: el menor
+    conteo = Counter(precios)
+    top = conteo.most_common(3)
+    return top[0][0]
+
+
+def extraer_precios(html: str, tienda: str = "") -> tuple[int | None, int | None, str]:
+    """Retorna (internet, tarjeta, metodo).
+    internet = precio sin tarjeta / normal web
+    tarjeta = precio con tarjeta tienda (CMR, Cencosud, Ripley) o None si no hay
+    """
+    from collections import Counter
+    soup = BeautifulSoup(html, "lxml")
+    t = tienda.lower()
+
+    def to_int(v) -> int | None:
+        try:
+            n = int(float(str(v).replace("$", "").replace(".", "").replace(",", "").strip()))
+            return n if 100000 <= n <= 3000000 else None
+        except Exception:
+            return None
+
+    def parse_monto(txt: str) -> int | None:
+        txt = txt.replace("$", "").replace(" ", "").replace(".", "")
+        try:
+            return to_int(txt)
+        except Exception:
+            return None
+
+    # --- Paris: offers en ld+json = [normal, internet, tarjeta] ---
+    if "paris" in t:
+        ofertas = []
+        for tag in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(tag.string or "")
+                items = data if isinstance(data, list) else [data]
+                for d in items:
+                    if isinstance(d, dict) and d.get("@type") == "Product":
+                        for o in (d.get("offers") or []):
+                            v = to_int(o.get("price"))
+                            if v:
+                                ofertas.append(v)
+            except Exception:
+                continue
+        if ofertas:
+            s = sorted(set(ofertas))
+            if len(s) >= 3:
+                return s[1], s[0], "paris-ld"  # internet, tarjeta
+            elif len(s) == 2:
+                return s[1], s[0], "paris-ld"
+            return s[0], None, "paris-ld"
+
+    # --- Ripley: bloque principal .normal-price-group ---
+    if "ripley" in t:
+        vals = [e.get_text(strip=True) for e in soup.select(".normal-price-group .price-value")[:3]]
+        nums = [parse_monto(x) for x in vals]
+        nums = [n for n in nums if n]
+        # esperado: [normal, internet, tarjeta]
+        if len(nums) >= 3:
+            return nums[1], nums[2], "ripley-web"
+        if len(nums) == 2:
+            return nums[0], nums[1], "ripley-web"
+
+    # --- Falabella: JSON "type":"cmrPrice|internetPrice|normalPrice" ---
+    if "falabella" in t:
+        tipos: dict[str, int] = {}
+        for m in re.finditer(
+            r'"type"\s*:\s*"(cmrPrice|internetPrice|eventPrice|normalPrice)"[^\}]{0,150}?"price"\s*:\s*\[?"?([\d\.]+)"?\]?',
+            html,
+        ):
+            tipo, val = m.group(1), m.group(2)
+            v = to_int(val.replace(".", ""))
+            # Falabella repite para garantías, quedarnos con el primero de cada tipo (el del producto)
+            if tipo not in tipos and v:
+                tipos[tipo] = v
+            if len(tipos) >= 3:
+                break
+        if tipos:
+            internet = tipos.get("internetPrice") or tipos.get("eventPrice")
+            tarjeta = tipos.get("cmrPrice")
+            # si no hay cmr, tarjeta = None, internet manda
+            metodo = "falabella-" + "+".join(sorted(tipos.keys()))
+            return internet, tarjeta, metodo
+
+    # --- Fallback genérico (una sola cifra) ---
+    precio, metodo = extraer_precio_html(html)
+    return precio, None, metodo
+
+
+def extraer_precio_html(html: str) -> tuple[int | None, str]:
+    from collections import Counter
+    soup = BeautifulSoup(html, "lxml")
+    # 1) JSON-LD (el más fiable en Paris/Falabella)
+    for tag in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(tag.string or "")
+            items = data if isinstance(data, list) else [data]
+            for d in items:
+                offers = (d.get("offers") if isinstance(d, dict) else None)
+                if offers:
+                    offs = offers if isinstance(offers, list) else [offers]
+                    for o in offs:
+                        p = o.get("price") or o.get("lowPrice")
+                        if p:
+                            v = int(float(str(p)))
+                            if 100000 <= v <= 3000000:
+                                return v, "json-ld"
+        except Exception:
+            continue
+    # 2) meta tags
+    for sel in ['meta[property="product:price:amount"]', 'meta[itemprop="price"]', 'meta[property="og:price:amount"]']:
+        tag = soup.select_one(sel)
+        if tag and tag.get("content"):
+            try:
+                v = int(float(tag["content"]))
+                if 100000 <= v <= 3000000:
+                    return v, "meta"
+            except ValueError:
+                pass
+    # 2b) JSON genérico tipo "price":"709990" (Ripley usa __NEXT_DATA__, no ld+json)
+    genericos = re.findall(r'"(?:price|salePrice|offerPrice|bestPrice)"\s*:\s*"?(\d{5,7}(?:\.\d+)?)"?', html)
+    vals = []
+    for g in genericos:
+        try:
+            v = int(float(g))
+            if 100000 <= v <= 3000000:
+                vals.append(v)
+        except ValueError:
+            continue
+    if vals:
+        return Counter(vals).most_common(1)[0][0], "json-data"
+    # 3) texto visible
+    texto = soup.get_text(" ", strip=True)
+    precio = parse_precio_cl(texto)
+    return precio, "texto" if precio else (None, "nada")
+
+
+async def fetch_requests(url: str, tienda: str = "") -> tuple[int | None, int | None, str, str]:
+    """Retorna (internet, tarjeta, metodo, detalle)."""
+    def _get():
+        from curl_cffi import requests as creq
+        r = creq.get(
+            url,
+            impersonate="chrome",
+            timeout=25,
+            headers={"Accept-Language": "es-CL,es;q=0.9", "Accept": "text/html,application/xhtml+xml"},
+        )
+        return r.status_code, r.text
+    try:
+        status, text = await asyncio.to_thread(_get)
+        if status != 200:
+            return None, None, "http", f"HTTP {status}"
+        internet, tarjeta, metodo = extraer_precios(text, tienda)
+        return internet, tarjeta, metodo, f"HTTP 200 ({len(text)//1000}kb)"
+    except Exception as e:
+        # fallback httpx por si acaso
+        try:
+            async with httpx.AsyncClient(headers=HEADERS, timeout=25, follow_redirects=True) as c:
+                r = await c.get(url)
+                if r.status_code != 200:
+                    return None, None, "http", f"HTTP {r.status_code} + curl fail {str(e)[:80]}"
+                internet, tarjeta, metodo = extraer_precios(r.text, tienda)
+                return internet, tarjeta, metodo, f"HTTP 200 httpx ({len(r.text)//1000}kb)"
+        except Exception as e2:
+            return None, None, "http", f"error: {e} / {e2}"
+
+
+async def fetch_playwright(url: str, tienda: str = "") -> tuple[int | None, int | None, str, str]:
+    """Intento con navegador real (para Falabella/Ripley/Paris con anti-bot)."""
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        return None, None, "playwright", "no instalado (pip install playwright)"
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page(user_agent=HEADERS["User-Agent"], locale="es-CL")
+            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(4000)
+            # scroll para gatillar lazy-load de precios
+            await page.evaluate("window.scrollTo(0, 800)")
+            await page.wait_for_timeout(1500)
+            html = await page.content()
+            await browser.close()
+            internet, tarjeta, metodo = extraer_precios(html, tienda)
+            return internet, tarjeta, f"playwright+{metodo}", "navegador real"
+    except Exception as e:
+        return None, None, "playwright", f"error: {str(e)[:200]}"
+
+
+async def chequear_producto(prod: dict) -> dict:
+    url = prod["url"]
+    tienda = prod.get("tienda", "")
+    # 1) intento rápido
+    internet, tarjeta, metodo, detalle = await fetch_requests(url, tienda)
+    # 2) si falla o no hay precio, usar navegador
+    if internet is None:
+        i2, t2, metodo2, detalle2 = await fetch_playwright(url, tienda)
+        if i2 is not None:
+            internet, tarjeta, metodo, detalle = i2, t2, metodo2, detalle2
+        else:
+            detalle = detalle + " | " + detalle2
+    mejor = None
+    for v in (internet, tarjeta):
+        if v is not None and (mejor is None or v < mejor):
+            mejor = v
+    return {
+        "tienda": prod["tienda"],
+        "nombre": prod["nombre"],
+        "url": url,
+        "precio": mejor,
+        "internet": internet,
+        "tarjeta": tarjeta,
+        "metodo": metodo,
+        "detalle": detalle,
+        "hora": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def cargar_estado() -> dict:
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def guardar_estado(estado: dict):
+    STATE_FILE.write_text(json.dumps(estado, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+async def enviar_telegram(mensaje: str):
+    if not BOT_TOKEN or not CHAT_ID:
+        print("  [Telegram] sin configurar (.env), solo consola.")
+        print(f"  {mensaje[:300]}")
+        return
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json={"chat_id": CHAT_ID, "text": mensaje, "disable_web_page_preview": False},
+            )
+            if r.status_code != 200:
+                print(f"  [Telegram] error {r.status_code}: {r.text[:200]}")
+            else:
+                print("  [Telegram] enviado OK")
+    except Exception as e:
+        print(f"  [Telegram] error: {e}")
+
+
+def formato_clp(n: int) -> str:
+    return "$" + f"{n:,}".replace(",", ".")
+
+
+async def ronda():
+    estado = cargar_estado()
+    print(f"\n=== Ronda {datetime.now().strftime('%H:%M:%S')} ===")
+    for prod in config.PRODUCTS:
+        res = await chequear_producto(prod)
+        key = res["url"]
+        previo = estado.get(key, {}).get("precio")
+        actual = res["precio"]
+        internet = res.get("internet")
+        tarjeta = res.get("tarjeta")
+
+        if actual is None:
+            print(f"? {res['tienda']}: no pude leer precio ({res['detalle'][:100]})")
+            print(f"   {res['url']}")
+        else:
+            flag = ""
+            if actual <= config.PRECIO_OBJETIVO:
+                flag = " !!BAJO $400.000!!"
+            detalle_precios = ""
+            if internet:
+                detalle_precios += f" internet {formato_clp(internet)}"
+            if tarjeta:
+                detalle_precios += f" | tarjeta {formato_clp(tarjeta)}"
+            print(f"{'[ALERTA]' if flag else '[OK]'} {res['tienda']} {res['nombre'][:30]}: mejor {formato_clp(actual)}{flag} ({detalle_precios.strip()}) (antes: {formato_clp(previo) if previo else '-'}) [{res['metodo']}]")
+
+            # Avisar si: primera vez bajo umbral, bajó de precio, o bajó vs anterior
+            debe_avisar = False
+            motivo = ""
+            if previo is None and actual <= config.PRECIO_OBJETIVO:
+                debe_avisar, motivo = True, "esta bajo tu meta"
+            elif previo is not None and actual < previo:
+                debe_avisar, motivo = True, f"bajo de {formato_clp(previo)} a {formato_clp(actual)}"
+            elif previo is None:
+                pass
+
+            if debe_avisar:
+                lineas = [
+                    "PS5 Cyber Day",
+                    f"{res['tienda']} - {res['nombre']}",
+                    motivo,
+                ]
+                if internet:
+                    lineas.append(f"Internet: {formato_clp(internet)}")
+                if tarjeta:
+                    lineas.append(f"Tarjeta: {formato_clp(tarjeta)}")
+                lineas.append(f"Mejor: {formato_clp(actual)}")
+                lineas.append(f"Meta: {formato_clp(config.PRECIO_OBJETIVO)}")
+                lineas.append(res["url"])
+                await enviar_telegram("\n".join(lineas))
+
+        estado[key] = {"precio": actual, "internet": internet, "tarjeta": tarjeta, "hora": res["hora"]}
+        # pausa corta entre tiendas para ir al minimo sin parecer bot
+        await asyncio.sleep(random.uniform(1, 2.5))
+
+    guardar_estado(estado)
+
+
+async def main():
+    print("🎮 Bot PS5 Cyber Day iniciado")
+    print(f"   Meta: <= ${config.PRECIO_OBJETIVO:,} | Intervalo: {config.INTERVALO_SEGUNDOS}s")
+    if not BOT_TOKEN:
+        print("   ⚠️ Telegram no configurado. Crea .env (ver .env.example). Igual verás precios en consola.")
+    while True:
+        try:
+            await ronda()
+        except KeyboardInterrupt:
+            print("\nDetenido.")
+            sys.exit(0)
+        except Exception as e:
+            print(f"Error en ronda: {e}")
+        # jitter +-20% para no ser predecible
+        espera = config.INTERVALO_SEGUNDOS * random.uniform(0.8, 1.2)
+        print(f"⏳ próxima revisión en {int(espera)}s...")
+        await asyncio.sleep(espera)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

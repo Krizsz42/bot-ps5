@@ -191,22 +191,37 @@ def extraer_precio_html(html: str) -> tuple[int | None, str]:
 
 
 async def fetch_requests(url: str, tienda: str = "") -> tuple[int | None, int | None, str, str]:
-    """Retorna (internet, tarjeta, metodo, detalle)."""
-    def _get():
+    """Retorna (internet, tarjeta, metodo, detalle). Prueba varias identidades (Ripley bloquea datacenters)."""
+    def _get(imp: str):
         from curl_cffi import requests as creq
         r = creq.get(
             url,
-            impersonate="chrome",
+            impersonate=imp,  # type: ignore
             timeout=25,
-            headers={"Accept-Language": "es-CL,es;q=0.9", "Accept": "text/html,application/xhtml+xml"},
+            headers={
+                "Accept-Language": "es-CL,es;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": "https://www.google.cl/",
+            },
         )
         return r.status_code, r.text
+
+    last_status, last_len = None, 0
     try:
-        status, text = await asyncio.to_thread(_get)
-        if status != 200:
-            return None, None, "http", f"HTTP {status}"
-        internet, tarjeta, metodo = extraer_precios(text, tienda)
-        return internet, tarjeta, metodo, f"HTTP 200 ({len(text)//1000}kb)"
+        for imp in ("chrome", "safari15_5", "chrome120"):
+            try:
+                status, text = await asyncio.to_thread(_get, imp)
+            except Exception as e:
+                last_status = f"err-{imp}"
+                continue
+            last_status, last_len = status, len(text)
+            if status != 200:
+                await asyncio.sleep(1)
+                continue
+            internet, tarjeta, metodo = extraer_precios(text, tienda)
+            if internet is not None:
+                return internet, tarjeta, f"{metodo}+{imp}", f"HTTP 200 ({len(text)//1000}kb)"
+        return None, None, "http", f"HTTP {last_status} len={last_len}"
     except Exception as e:
         # fallback httpx por si acaso
         try:

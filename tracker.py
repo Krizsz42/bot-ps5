@@ -59,6 +59,49 @@ def parse_precio_cl(texto: str) -> int | None:
     return top[0][0]
 
 
+def normalizar(txt: str) -> str:
+    import unicodedata
+    txt = unicodedata.normalize("NFD", txt.lower())
+    return "".join(c for c in txt if unicodedata.category(c) != "Mn")
+
+
+def extraer_cupones(html: str) -> list:
+    """Busca cupon de DESCUENTO: exige palabra clave + precio $ cerca.
+    Ignora 'cupón de juego' del bundle, footers y legales. Max 2."""
+    soup = BeautifulSoup(html, "lxml")
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    texto = soup.get_text(" ", strip=True)
+    norm = normalizar(texto)
+    kws = sorted((normalizar(k) for k in config.CUPON_KEYWORDS), key=len, reverse=True)
+    excl = [normalizar(e) for e in getattr(config, "CUPON_EXCLUIR", [])]
+    hallazgos = []
+    for kw in kws:
+        for m in re.finditer(r"\b" + re.escape(kw) + r"\b", norm):
+            i = m.start()
+            a = max(0, i - 120)
+            ctx = texto[a:i + len(kw) + 120]
+            ctx = re.sub(r"\s+", " ", ctx).strip()
+            nctx = normalizar(ctx)
+            if any(e in nctx for e in excl):
+                continue
+            if "$" not in ctx:
+                continue
+            precio = parse_precio_cl(ctx)
+            hallazgos.append({"kw": kw, "contexto": ctx[:220], "precio": precio})
+            if len(hallazgos) >= 6:
+                break
+    vistos, final = set(), []
+    for h in hallazgos:
+        key = h["contexto"][:80]
+        if key not in vistos:
+            vistos.add(key)
+            final.append(h)
+        if len(final) >= 2:
+            break
+    return final
+
+
 def extraer_precios(html: str, tienda: str = "") -> tuple[int | None, int | None, str]:
     """Retorna (internet, tarjeta, metodo).
     internet = precio sin tarjeta / normal web
@@ -219,20 +262,21 @@ async def fetch_requests(url: str, tienda: str = "") -> tuple[int | None, int | 
                 await asyncio.sleep(1)
                 continue
             internet, tarjeta, metodo = extraer_precios(text, tienda)
+            cupones = extraer_cupones(text)
             if internet is not None:
-                return internet, tarjeta, f"{metodo}+{imp}", f"HTTP 200 ({len(text)//1000}kb)"
-        return None, None, "http", f"HTTP {last_status} len={last_len}"
+                return internet, tarjeta, f"{metodo}+{imp}", f"HTTP 200 ({len(text)//1000}kb)", cupones
+        return None, None, "http", f"HTTP {last_status} len={last_len}", []
     except Exception as e:
         # fallback httpx por si acaso
         try:
             async with httpx.AsyncClient(headers=HEADERS, timeout=25, follow_redirects=True) as c:
                 r = await c.get(url)
                 if r.status_code != 200:
-                    return None, None, "http", f"HTTP {r.status_code} + curl fail {str(e)[:80]}"
+                    return None, None, "http", f"HTTP {r.status_code} + curl fail {str(e)[:80]}", []
                 internet, tarjeta, metodo = extraer_precios(r.text, tienda)
-                return internet, tarjeta, metodo, f"HTTP 200 httpx ({len(r.text)//1000}kb)"
+                return internet, tarjeta, metodo, f"HTTP 200 httpx ({len(r.text)//1000}kb)", extraer_cupones(r.text)
         except Exception as e2:
-            return None, None, "http", f"error: {e} / {e2}"
+            return None, None, "http", f"error: {e} / {e2}", []
 
 
 async def fetch_playwright(url: str, tienda: str = "") -> tuple[int | None, int | None, str, str]:
@@ -253,21 +297,21 @@ async def fetch_playwright(url: str, tienda: str = "") -> tuple[int | None, int 
             html = await page.content()
             await browser.close()
             internet, tarjeta, metodo = extraer_precios(html, tienda)
-            return internet, tarjeta, f"playwright+{metodo}", "navegador real"
+            return internet, tarjeta, f"playwright+{metodo}", "navegador real", extraer_cupones(html)
     except Exception as e:
-        return None, None, "playwright", f"error: {str(e)[:200]}"
+        return None, None, "playwright", f"error: {str(e)[:200]}", []
 
 
 async def chequear_producto(prod: dict) -> dict:
     url = prod["url"]
     tienda = prod.get("tienda", "")
     # 1) intento rápido
-    internet, tarjeta, metodo, detalle = await fetch_requests(url, tienda)
+    internet, tarjeta, metodo, detalle, cupones = await fetch_requests(url, tienda)
     # 2) si falla o no hay precio, usar navegador
     if internet is None:
-        i2, t2, metodo2, detalle2 = await fetch_playwright(url, tienda)
+        i2, t2, metodo2, detalle2, c2 = await fetch_playwright(url, tienda)
         if i2 is not None:
-            internet, tarjeta, metodo, detalle = i2, t2, metodo2, detalle2
+            internet, tarjeta, metodo, detalle, cupones = i2, t2, metodo2, detalle2, c2
         else:
             detalle = detalle + " | " + detalle2
     mejor = None
@@ -281,6 +325,7 @@ async def chequear_producto(prod: dict) -> dict:
         "precio": mejor,
         "internet": internet,
         "tarjeta": tarjeta,
+        "cupones": cupones,
         "metodo": metodo,
         "detalle": detalle,
         "hora": datetime.now().isoformat(timespec="seconds"),
@@ -417,7 +462,28 @@ async def ronda():
                 lineas.append(res["url"])
                 await enviar_a_todos("\n".join(lineas))
 
-        estado[key] = {"precio": actual, "internet": internet, "tarjeta": tarjeta, "hora": res["hora"]}
+            # Cupones: avisar solo si aparece algo nuevo
+            cupones = res.get("cupones") or []
+            firma = "|".join(sorted(h["contexto"][:60] for h in cupones))
+            firma_previa = estado.get(key, {}).get("cupones_sig", "")
+            if cupones and firma != firma_previa:
+                cl = ["CUPON detectado", f"{res['tienda']} - {res['nombre']}"]
+                for h in cupones[:2]:
+                    extra = f" (precio cercano: {formato_clp(h['precio'])})" if h.get("precio") else ""
+                    cl.append(f"- '{h['kw']}'{extra}: {h['contexto'][:160]}")
+                cl.append(res["url"])
+                await enviar_a_todos("\n".join(cl))
+
+        key_sig = ""
+        if actual is not None:
+            cup_list = res.get("cupones") or []
+            key_sig = "|".join(sorted(h["contexto"][:60] for h in cup_list))
+        else:
+            key_sig = estado.get(key, {}).get("cupones_sig", "")
+        estado[key] = {"precio": actual, "internet": internet if actual is not None else estado.get(key, {}).get("internet"),
+                       "tarjeta": tarjeta if actual is not None else estado.get(key, {}).get("tarjeta"),
+                       "cupones_sig": key_sig,
+                       "hora": res["hora"]}
         # pausa corta entre tiendas para ir al minimo sin parecer bot
         await asyncio.sleep(random.uniform(1, 2.5))
 

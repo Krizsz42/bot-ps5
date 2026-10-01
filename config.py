@@ -9,6 +9,19 @@ PRECIO_OBJETIVO = 400000
 # así que cada producto se revisa aprox cada 90s.
 INTERVALO_SEGUNDOS = 60
 
+# --- Detección de cupones: exige la palabra + un precio $ cerca ---
+# Se ignoran contextos de "juego" (cupón de juego del bundle), footers y legales.
+CUPON_KEYWORDS = [
+    "cupon",
+    "cupon de descuento",
+    "codigo de descuento",
+    "codigo promocional",
+    "con cupon",
+    "cupon cyber",
+    "descuento extra",
+]
+CUPON_EXCLUIR = ["juego", "devolucion", "gift card", "juguete", "boleta"]
+
 # --- Productos a vigilar (9 links exactos del usuario) ---
 PRODUCTS = [
     {

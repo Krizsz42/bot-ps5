@@ -346,46 +346,75 @@ def guardar_estado(estado: dict):
 
 
 SUBS_FILE = Path(__file__).parent / "subscribers.json"
+DEFAULT_PREFS = {"ps5": True, "switch": True}
 
 
-def cargar_subs() -> set:
-    subs = set()
+def categoria(prod: dict) -> str:
+    """ps5 o switch. Los Switch empiezan con 'SW' en el nombre."""
+    if prod.get("cat") in ("ps5", "switch"):
+        return prod["cat"]
+    return "switch" if prod.get("nombre", "").startswith("SW") else "ps5"
+
+
+def cargar_subs() -> dict:
+    subs: dict = {}
     if CHAT_ID:
-        subs.add(str(CHAT_ID))
+        subs[str(CHAT_ID)] = dict(DEFAULT_PREFS)
     if SUBS_FILE.exists():
         try:
-            for x in json.loads(SUBS_FILE.read_text(encoding="utf-8")):
-                subs.add(str(x))
+            data = json.loads(SUBS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):  # formato viejo: lista de chats
+                for x in data:
+                    subs[str(x)] = dict(DEFAULT_PREFS)
+            elif isinstance(data, dict):
+                for chat, prefs in data.items():
+                    p = dict(DEFAULT_PREFS)
+                    if isinstance(prefs, dict):
+                        p.update({k: bool(v) for k, v in prefs.items() if k in p})
+                    subs[str(chat)] = p
         except Exception:
             pass
     return subs
+
+
+def guardar_subs(subs: dict):
+    SUBS_FILE.write_text(json.dumps(subs, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def agregar_sub(chat: str):
     try:
         subs = cargar_subs()
         if str(chat) not in subs:
-            subs.add(str(chat))
-            SUBS_FILE.write_text(json.dumps(sorted(subs), indent=2), encoding="utf-8")
+            subs[str(chat)] = dict(DEFAULT_PREFS)
+            guardar_subs(subs)
             print(f"  [Subs] nuevo {chat} (total {len(subs)})", flush=True)
     except Exception as e:
         print(f"  [Subs] error: {e}", flush=True)
 
 
+def set_pref(chat: str, cat: str, valor: bool):
+    subs = cargar_subs()
+    p = subs.get(str(chat), dict(DEFAULT_PREFS))
+    p[cat] = valor
+    subs[str(chat)] = p
+    guardar_subs(subs)
+
+
 def quitar_sub(chat: str):
     try:
         subs = cargar_subs()
-        subs.discard(str(chat))
+        subs.pop(str(chat), None)
         if CHAT_ID:
-            subs.add(str(CHAT_ID))
-        SUBS_FILE.write_text(json.dumps(sorted(subs), indent=2), encoding="utf-8")
+            subs.setdefault(str(CHAT_ID), dict(DEFAULT_PREFS))
+        guardar_subs(subs)
     except Exception:
         pass
 
 
-async def enviar_a_todos(mensaje: str):
-    for chat in sorted(cargar_subs()):
-        await enviar_telegram(mensaje, chat_id=chat)
+async def enviar_a_todos(mensaje: str, cat: str | None = None):
+    for chat, prefs in sorted(cargar_subs().items()):
+        if cat is None or prefs.get(cat, True):
+            await enviar_telegram(mensaje, chat_id=chat)
 
 
 async def enviar_telegram(mensaje: str, chat_id: str | None = None):
@@ -469,7 +498,7 @@ async def ronda():
                 lineas.append(f"Mejor: {formato_clp(actual)}")
                 lineas.append(f"Meta: {formato_clp(meta)}")
                 lineas.append(res["url"])
-                await enviar_a_todos("\n".join(lineas))
+                await enviar_a_todos("\n".join(lineas), cat=categoria(res))
 
             # Cupones: avisar solo si aparece algo nuevo
             cupones = res.get("cupones") or []
@@ -481,7 +510,7 @@ async def ronda():
                     extra = f" (precio cercano: {formato_clp(h['precio'])})" if h.get("precio") else ""
                     cl.append(f"- '{h['kw']}'{extra}: {h['contexto'][:160]}")
                 cl.append(res["url"])
-                await enviar_a_todos("\n".join(cl))
+                await enviar_a_todos("\n".join(cl), cat=categoria(res))
 
         key_sig = ""
         if actual is not None:
@@ -527,6 +556,21 @@ async def telegram_poll_loop():
                     continue
                 # auto-suscripcion: quien escriba queda registrado para las alertas
                 agregar_sub(chat)
+                if texto in ("solops5", "/solops5", "solo ps5"):
+                    set_pref(chat, "ps5", True)
+                    set_pref(chat, "switch", False)
+                    await enviar_telegram("Listo: solo te avisare de PS5. Con /todo vuelves a ver todo.", chat_id=chat)
+                    continue
+                if texto in ("soloswitch", "/soloswitch", "solo switch"):
+                    set_pref(chat, "switch", True)
+                    set_pref(chat, "ps5", False)
+                    await enviar_telegram("Listo: solo te avisare de Switch. Con /todo vuelves a ver todo.", chat_id=chat)
+                    continue
+                if texto in ("todo", "/todo", "ambos", "todas"):
+                    set_pref(chat, "ps5", True)
+                    set_pref(chat, "switch", True)
+                    await enviar_telegram("Listo: te avisare de PS5 y Switch.", chat_id=chat)
+                    continue
                 # comandos abiertos a cualquiera (las alertas de precio siguen yendo solo al dueno)
                 if texto in ("test", "/test", "hola", "ok", "/start", "start"):
                     estado = cargar_estado()

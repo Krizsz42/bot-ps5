@@ -592,8 +592,10 @@ async def telegram_poll_loop():
                                 extra += f" int {formato_clp(v['internet'])}"
                             if v.get("tarjeta"):
                                 extra += f" tarj {formato_clp(v['tarjeta'])}"
-                            lineas.append(f"- {prod['tienda']}: {formato_clp(v['precio'])} ({extra.strip()})")
-                    await enviar_telegram("\n".join(lineas[:30]), chat_id=chat)
+                            lineas.append(f"- {prod['tienda']} {prod['nombre'][:25]}: {formato_clp(v['precio'])} ({extra.strip()})")
+                        else:
+                            lineas.append(f"- {prod['tienda']} {prod['nombre'][:25]}: sin lectura")
+                    await enviar_telegram("\n".join(lineas[:40]), chat_id=chat)
         except Exception as e:
             print(f"  [Telegram-poll] error: {e}", flush=True)
             await asyncio.sleep(10)

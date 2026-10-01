@@ -69,4 +69,19 @@ PRODUCTS = [
         "nombre": "PS5 HW Standard GT7",
         "url": "https://www.falabella.com/falabella-cl/product/80648267/Consola%20PS5%20HW%20Standard%20GT7%20Sony/80648267",
     },
+    {
+        "tienda": "Lider",
+        "nombre": "PS5 Digital Astro+GT7 00071171902355",
+        "url": "https://www.lider.cl/ip/videojuegos/consola-playstation-5-edicion-digital-con-astro-bot-y-gran-turismo-7/00071171902355",
+    },
+    {
+        "tienda": "Lider",
+        "nombre": "PS5 Digital Astro+GT7 00071171902395",
+        "url": "https://www.lider.cl/ip/videojuegos/consola-playstation-5-digital-con-astro-bot-y-gran-turismo-7/00071171902395",
+    },
+    {
+        "tienda": "Lider",
+        "nombre": "PS5 Slim Digital 00494887241591",
+        "url": "https://www.lider.cl/ip/videojuegos/consola-sony-ps5-playstation-5-slim-edicion-digital-/00494887241591",
+    },
 ]

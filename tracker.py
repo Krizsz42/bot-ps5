@@ -414,9 +414,18 @@ def formato_clp(n: int) -> str:
 
 async def ronda():
     estado = cargar_estado()
-    print(f"\n=== Ronda {datetime.now().strftime('%H:%M:%S')} ===")
-    for prod in config.PRODUCTS:
-        res = await chequear_producto(prod)
+    print(f"\n=== Ronda {datetime.now().strftime('%H:%M:%S')} ({len(config.PRODUCTS)} productos) ===", flush=True)
+    sem = asyncio.Semaphore(3)  # max 3 tiendas en paralelo para no parecer bot
+
+    async def procesar(prod):
+        meta = prod.get("meta", config.PRECIO_OBJETIVO)
+        async with sem:
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+            try:
+                res = await chequear_producto(prod)
+            except Exception as e:
+                print(f"? {prod.get('tienda')}: error {str(e)[:120]}", flush=True)
+                return
         key = res["url"]
         previo = estado.get(key, {}).get("precio")
         actual = res["precio"]
@@ -424,23 +433,23 @@ async def ronda():
         tarjeta = res.get("tarjeta")
 
         if actual is None:
-            print(f"? {res['tienda']}: no pude leer precio ({res['detalle'][:100]})")
-            print(f"   {res['url']}")
+            print(f"? {res['tienda']}: no pude leer precio ({res['detalle'][:100]})", flush=True)
+            print(f"   {res['url']}", flush=True)
         else:
             flag = ""
-            if actual <= config.PRECIO_OBJETIVO:
-                flag = " !!BAJO $400.000!!"
+            if actual <= meta:
+                flag = f" !!BAJO META {formato_clp(meta)}!!"
             detalle_precios = ""
             if internet:
                 detalle_precios += f" internet {formato_clp(internet)}"
             if tarjeta:
                 detalle_precios += f" | tarjeta {formato_clp(tarjeta)}"
-            print(f"{'[ALERTA]' if flag else '[OK]'} {res['tienda']} {res['nombre'][:30]}: mejor {formato_clp(actual)}{flag} ({detalle_precios.strip()}) (antes: {formato_clp(previo) if previo else '-'}) [{res['metodo']}]")
+            print(f"{'[ALERTA]' if flag else '[OK]'} {res['tienda']} {res['nombre'][:30]}: mejor {formato_clp(actual)}{flag} ({detalle_precios.strip()}) (antes: {formato_clp(previo) if previo else '-'}) [{res['metodo']}]", flush=True)
 
             # Avisar si: primera vez bajo umbral, bajó de precio, o bajó vs anterior
             debe_avisar = False
             motivo = ""
-            if previo is None and actual <= config.PRECIO_OBJETIVO:
+            if previo is None and actual <= meta:
                 debe_avisar, motivo = True, "esta bajo tu meta"
             elif previo is not None and actual < previo:
                 debe_avisar, motivo = True, f"bajo de {formato_clp(previo)} a {formato_clp(actual)}"
@@ -449,7 +458,7 @@ async def ronda():
 
             if debe_avisar:
                 lineas = [
-                    "PS5 Cyber Day",
+                    "Cyber Day",
                     f"{res['tienda']} - {res['nombre']}",
                     motivo,
                 ]
@@ -458,7 +467,7 @@ async def ronda():
                 if tarjeta:
                     lineas.append(f"Tarjeta: {formato_clp(tarjeta)}")
                 lineas.append(f"Mejor: {formato_clp(actual)}")
-                lineas.append(f"Meta: {formato_clp(config.PRECIO_OBJETIVO)}")
+                lineas.append(f"Meta: {formato_clp(meta)}")
                 lineas.append(res["url"])
                 await enviar_a_todos("\n".join(lineas))
 
@@ -484,9 +493,8 @@ async def ronda():
                        "tarjeta": tarjeta if actual is not None else estado.get(key, {}).get("tarjeta"),
                        "cupones_sig": key_sig,
                        "hora": res["hora"]}
-        # pausa corta entre tiendas para ir al minimo sin parecer bot
-        await asyncio.sleep(random.uniform(1, 2.5))
 
+    await asyncio.gather(*(procesar(p) for p in config.PRODUCTS))
     guardar_estado(estado)
 
 

@@ -84,4 +84,29 @@ PRODUCTS = [
         "nombre": "PS5 Slim Digital 00494887241591",
         "url": "https://www.lider.cl/ip/videojuegos/consola-sony-ps5-playstation-5-slim-edicion-digital-/00494887241591",
     },
+    {
+        "tienda": "Claro",
+        "nombre": "PS5 Pro Digital",
+        "url": "https://tienda.clarochile.cl/catalogo/tecnologia-y-accesorios/gaming-claro/consola-play-station-5-pro-digital-7007576acc",
+    },
+    {
+        "tienda": "Claro",
+        "nombre": "PS5 Digital Slim Astro+GT7",
+        "url": "https://tienda.clarochile.cl/catalogo/tecnologia-y-accesorios/gaming-claro/consola-play-station-5-digital-slim-astro-bot-y-gran-turismo-7-7007248acc",
+    },
+    {
+        "tienda": "Hites",
+        "nombre": "PS5 Digital 825GB Astro+GT7",
+        "url": "https://www.hites.com/consola-ps5-edicion-digital-825-gb-juego-astro-bot-juego-gran-turismo-7-970278001.html",
+    },
+    {
+        "tienda": "Hites",
+        "nombre": "PS5 Disco 1TB Astro+GT7",
+        "url": "https://www.hites.com/consola-ps5-edicion-disco-1-tb-juego-astro-bot-juego-gran-turismo-7-965602001.html",
+    },
+    {
+        "tienda": "Weplay",
+        "nombre": "PS5 Slim",
+        "url": "https://www.weplay.cl/consola-playstation-5-slim.html",
+    },
 ]

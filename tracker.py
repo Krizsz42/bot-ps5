@@ -556,7 +556,22 @@ async def telegram_poll_loop():
                     continue
                 # auto-suscripcion: quien escriba queda registrado para las alertas
                 agregar_sub(chat)
-                if texto in ("solops5", "/solops5", "solo ps5"):
+                if texto in ("mejor", "/mejor", "mejorprecio", "mejor precio", "barato", "masbarato", "mas barato", "más barato", "sintarjeta", "sin tarjeta"):
+                    estado = cargar_estado()
+                    filas = []
+                    for prod in config.PRODUCTS:
+                        v = estado.get(prod["url"], {})
+                        if v.get("internet"):
+                            filas.append((v["internet"], prod))
+                    if not filas:
+                        await enviar_telegram("Aun sin lecturas de precio internet.", chat_id=chat)
+                    else:
+                        filas.sort(key=lambda x: x[0])
+                        lineas = ["Mas barato SIN tarjeta (solo internet):"]
+                        for precio, prod in filas[:5]:
+                            lineas.append(f"- {prod['tienda']} {prod['nombre'][:28]}: {formato_clp(precio)}")
+                        await enviar_telegram("\n".join(lineas), chat_id=chat)
+                    continue
                     set_pref(chat, "ps5", True)
                     set_pref(chat, "switch", False)
                     await enviar_telegram("Listo: solo te avisare de PS5. Con /todo vuelves a ver todo.", chat_id=chat)
